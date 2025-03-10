@@ -5,6 +5,13 @@ const TR_BLOCK_DIM:        i32 = 16;
 const TR_TILE_DIM:         i32 = 32;
 const TR_ELEMS_PER_THREAD: i32 = 8;
 
+// Shared memory for transpositions.
+// In shared memory, every i8 and i16 is represented by a full i32
+var<workgroup> transpose_shared_memory_i8: array<i32, TR_TILE_DIM*(TR_TILE_DIM+1)>;
+var<workgroup> transpose_shared_memory_i16: array<i32, TR_TILE_DIM*(TR_TILE_DIM+1)>;
+var<workgroup> transpose_shared_memory_i32: array<i32, TR_TILE_DIM*(TR_TILE_DIM+1)>;
+var<workgroup> transpose_shared_memory_i64: array<i64, TR_TILE_DIM*(TR_TILE_DIM+1)>;
+
 override lmad_copy_block_size_x: i32 = 1;
 override lmad_copy_block_size_y: i32 = 1;
 override lmad_copy_block_size_z: i32 = 1;
@@ -145,12 +152,58 @@ fn map_transpose_NAME(
     @builtin(local_invocation_id)  local_id: vec3<u32>,  // local_id  -> unique id of a thread within a group
     @builtin(num_workgroups)       num_groups: vec3<u32>
 ) {
-    for (var y = 0; y < mt_NAME_args.y_elems; y += 1) {
-        for (var x = 0; x < mt_NAME_args.x_elems; x += 1) {
-            let dst_idx = mt_NAME_args.dst_offset[0] + x * mt_NAME_args.y_elems + y;
-            let src_idx = mt_NAME_args.src_offset[0] + y * mt_NAME_args.y_elems + x;
-            write_ELEM_TYPE(&mt_NAME_dst_mem, dst_idx, read_ELEM_TYPE(&mt_NAME_src_mem, src_idx));
+    let dst_offset = mt_NAME_args.dst_offset[0];
+    let src_offset = mt_NAME_args.src_offset[0];
+
+    let tblock_id_0 = i32(group_id[0]);
+    let global_id_0 = i32(global_id[0]);
+    var tblock_id_1 = i32(group_id[1]);
+    var global_id_1 = i32(global_id[1]);
+
+    for (var i1 = 0; i1 <= mt_NAME_args.repeat_1; i1++) {
+        var tblock_id_2 = i32(group_id[2]);
+        var global_id_2 = i32(global_id[2]);
+
+        for (var i2 = 0; i2 < mt_NAME_args.repeat_2; i2++) {
+            var our_array_offset = tblock_id_2 * mt_NAME_args.x_elems * mt_NAME_args.y_elems;
+            var odata_offset = dst_offset + our_array_offset;
+            var idata_offset = src_offset + our_array_offset;
+            var x_index = i32(global_id_0);
+            var y_index = tblock_id_1 * TR_TILE_DIM + i32(local_id[1]);
+
+            if (x_index < mt_NAME_args.x_elems) {
+                for (var j = 0; j < TR_ELEMS_PER_THREAD; j++) {
+                    var index_i = (y_index + j * (TR_TILE_DIM/TR_ELEMS_PER_THREAD)) * mt_NAME_args.x_elems + x_index;
+                    if (y_index + j * (TR_TILE_DIM/TR_ELEMS_PER_THREAD) < mt_NAME_args.y_elems) {
+                        let shared_offset = (i32(local_id[1]) + j * (TR_TILE_DIM/TR_ELEMS_PER_THREAD)) * (TR_TILE_DIM+1) + i32(local_id[0]);
+                        let src_val = read_ELEM_TYPE(&mt_NAME_src_mem, idata_offset + index_i);
+                        transpose_shared_memory_ELEM_TYPE[shared_offset] = src_val;
+                    }
+                }
+            }
+
+            workgroupBarrier();
+
+            x_index = tblock_id_1 * TR_TILE_DIM + i32(local_id[0]);
+            y_index = tblock_id_0 * TR_TILE_DIM + i32(local_id[1]);
+
+            if (x_index < mt_NAME_args.y_elems) {
+                for (var j = 0; j < TR_ELEMS_PER_THREAD; j++) {
+                    var index_out = (y_index + j * (TR_TILE_DIM/TR_ELEMS_PER_THREAD)) * mt_NAME_args.y_elems + x_index;
+                    if (y_index + j * (TR_TILE_DIM/TR_ELEMS_PER_THREAD) < mt_NAME_args.x_elems) {
+                        let shared_offset = i32(local_id[0]) * (TR_TILE_DIM+1) + i32(local_id[1]) + j * (TR_TILE_DIM/TR_ELEMS_PER_THREAD);
+                        let src_val = ELEM_TYPE(transpose_shared_memory_ELEM_TYPE[shared_offset]);
+                        write_ELEM_TYPE(&mt_NAME_dst_mem, odata_offset + index_out, src_val);
+                    }
+                }
+            }
+
+            tblock_id_2 += i32(num_groups[2]);
+            global_id_2 += i32(num_groups[2] * num_groups[2]);
         }
+
+        tblock_id_1 += i32(num_groups[1]);
+        global_id_1 += i32(num_groups[1] * num_groups[1]);
     }
 }
 
